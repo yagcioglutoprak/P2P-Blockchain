@@ -8,6 +8,7 @@ def add_node(ip, port):
     sock.close()
 
 def get_chain(ip, port):
+    print("hry")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((ip, int(port)))
     sock.sendall(bytes("getchain", 'utf-8'))
@@ -20,5 +21,5 @@ def mine_block(ip, port):
     sock.sendall(bytes("mine", 'utf-8'))
     sock.close()	
 
-blockchain = get_chain("127.0.0.1", "2007")
-print(blockchain)
+blockchain = get_chain("127.0.0.1", "2006")
+print("value is "+blockchain)

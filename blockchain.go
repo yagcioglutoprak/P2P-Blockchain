@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"time"
-	"net"
+	"fmt"
 	"log"
+	"net"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Block struct {
@@ -168,15 +171,22 @@ func (blockchain *Blockchain) validateChain(receivedChain []Block) bool {
 
 func (blockchain *Blockchain) Sync() {
     for node := range blockchain.Nodes {
+        _, err := net.DialTimeout("tcp", node, time.Second*5)
+        if err != nil {
+            log.Printf("Failed to connect to node %s: %v", node, err)
+            continue
+        }
         conn, err := net.Dial("tcp", node)
         if err != nil {
+            log.Printf("Failed to connect to node %s: %v", node, err)
             continue
         }
         defer conn.Close()
         conn.Write([]byte("getchain"))
-		buf := make([]byte, 4096)
+        buf := make([]byte, 4096)
         n, err := conn.Read(buf)
         if err != nil {
+            log.Printf("Failed to get chain from node %s: %v", node, err)
             continue
         }
         receivedData := string(buf[:n])
@@ -187,6 +197,7 @@ func (blockchain *Blockchain) Sync() {
         }
     }
 }
+
 
 
 func (blockchain *Blockchain) mineBlock() {
@@ -216,6 +227,37 @@ func (blockchain *Blockchain) PoW(lastBlock Block) int64 {
 	}
 	return proof
 }
+func (blockchain *Blockchain) loadNodesFromFile() {
+    file, err := os.Open("nodes.txt")
+    if err != nil {
+        log.Fatalf("Failed to open nodes.txt: %v", err)
+    }
+    defer file.Close()
+
+    scanner := bufio.NewScanner(file)
+    for scanner.Scan() {
+        node := scanner.Text()
+        parts := strings.Split(node, ":")
+        if len(parts) != 2 {
+            log.Printf("Invalid node information in nodes.txt: %s", node)
+            continue
+        }
+        ip, port := parts[0], parts[1]
+        if blockchain.validateNode(ip, port) {
+            fmt.Println(ip)
+            fmt.Println(port)
+            blockchain.Nodes[ip+":"+port] = true
+            blockchain.NodeCount++
+        } else {
+            log.Printf("Invalid node information in nodes.txt: %s", node)
+        }
+    }
+
+    if err := scanner.Err(); err != nil {
+        log.Fatalf("Failed to read nodes.txt: %v", err)
+    }
+}
+
 
 func main() {
 	
@@ -228,6 +270,7 @@ func main() {
 		
 	
 	blockchain := Blockchain{Chain: []Block{}, Nodes: map[string]bool{}}
+    blockchain.loadNodesFromFile()
 	blockchain.NodeIP, blockchain.NodePort, _ = net.SplitHostPort(lis.Addr().String())
 
 	
