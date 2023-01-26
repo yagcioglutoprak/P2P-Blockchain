@@ -174,11 +174,15 @@ func (blockchain *Blockchain) Sync() {
         _, err := net.DialTimeout("tcp", node, time.Second*5)
         if err != nil {
             log.Printf("Failed to connect to node %s: %v", node, err)
+            delete(blockchain.Nodes, node)
+            blockchain.NodeCount--
             continue
         }
         conn, err := net.Dial("tcp", node)
         if err != nil {
             log.Printf("Failed to connect to node %s: %v", node, err)
+            delete(blockchain.Nodes, node)
+            blockchain.NodeCount--
             continue
         }
         defer conn.Close()
@@ -187,6 +191,8 @@ func (blockchain *Blockchain) Sync() {
         n, err := conn.Read(buf)
         if err != nil {
             log.Printf("Failed to get chain from node %s: %v", node, err)
+            delete(blockchain.Nodes, node)
+            blockchain.NodeCount--
             continue
         }
         receivedData := string(buf[:n])
@@ -197,6 +203,7 @@ func (blockchain *Blockchain) Sync() {
         }
     }
 }
+
 
 
 

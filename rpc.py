@@ -22,4 +22,5 @@ def mine_block(ip, port):
     sock.close()	
 
 blockchain = get_chain("127.0.0.1", "2006")
+mine_block("127.0.0.1","2006")
 print("value is "+blockchain)
