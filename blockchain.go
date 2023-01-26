@@ -2,32 +2,43 @@ package main
 
 import (
 	"bufio"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 )
-
+var syncLock = false
 type Block struct {
-	Index        int64
-	Timestamp    int64
-	Transactions []Transaction
-	Proof        int64
-	Hash         string
-	PreviousHash string
+    Index         int64
+    Timestamp     int64
+    Transactions  []Transaction
+    Proof         int64
+    Hash          string
+    PreviousHash  string
+    Miner         string
 }
+
+
 
 type Transaction struct {
-	Sender    string
-	Recipient string
-	Amount    int64
+    SenderPublicKey string
+    Recipient       string
+    Amount          int64
+    Signature       []byte
 }
+
+
+var Accounts map[string]*ecdsa.PrivateKey
 
 type Blockchain struct {
     Chain      []Block
@@ -36,14 +47,47 @@ type Blockchain struct {
     NodeIP     string
     NodePort   string
     NodeCount  int
+    Accounts   map[string]*ecdsa.PrivateKey
 }
 
 
-func (blockchain *Blockchain) NewTransaction(sender string, recipient string, amount int64) int {
-	blockchain.TmpTxs = append(blockchain.TmpTxs, Transaction{Sender: sender, Recipient: recipient, Amount: amount})
-	return int(blockchain.LastBlock().Index + 1)
+
+
+type Account struct {
+    PublicKey  string
+    PrivateKey string
+}
+
+func (blockchain *Blockchain) NewTransaction(senderPrivateKey *ecdsa.PrivateKey, recipient string, amount int64) int {
+    // Get the public key from the private key
+    pubKey := senderPrivateKey.Public().(*ecdsa.PublicKey)
+    // Convert the public key to a string
+    senderPublicKey := hex.EncodeToString(elliptic.Marshal(elliptic.P256(), pubKey.X, pubKey.Y))
+    // Create the transaction
+    transaction := Transaction{SenderPublicKey: senderPublicKey, Recipient: recipient, Amount: amount}
+    // Sign the transaction with the private key
+    hashedTransaction, _ := json.Marshal(transaction)
+    r, s, _ := ecdsa.Sign(rand.Reader, senderPrivateKey, hashedTransaction)
+    transaction.Signature = append(r.Bytes(), s.Bytes()...)
+    // Add the transaction to the temporary transaction pool
+    blockchain.TmpTxs = append(blockchain.TmpTxs, transaction)
+    // Return the index of the next block that this transaction will be included in
+    return int(blockchain.LastBlock().Index + 1)
+}
+
+
+
+func (blockchain *Blockchain) CreateAccount(ip string) {
+    curve := elliptic.P256()
+    priv, _, _, _ := elliptic.GenerateKey(curve, rand.Reader)
+    privkey := new(ecdsa.PrivateKey)
+privkey.Curve = elliptic.P256()
+privkey.D = new(big.Int).SetBytes(priv)
+privkey.PublicKey.X, privkey.PublicKey.Y = privkey.Curve.ScalarBaseMult(priv)
+blockchain.Accounts[ip] = privkey
 
 }
+
 
 func (blockchain *Blockchain) LastBlock() Block {
     if len(blockchain.Chain) == 0 {
@@ -66,6 +110,17 @@ func (blockchain *Blockchain) NewBlock(proof int64, previousHash string) Block {
 	blockchain.Chain = append(blockchain.Chain, block)
 	return block
 }
+
+func generateKeys() *Account {
+    curve := elliptic.P256()
+
+    priv, _ := ecdsa.GenerateKey(curve, rand.Reader)
+    pub := priv.PublicKey
+    publicKey := hex.EncodeToString(elliptic.Marshal(elliptic.P256(), pub.X, pub.Y))
+    privateKey := hex.EncodeToString(priv.D.Bytes())
+    return &Account{PublicKey: publicKey, PrivateKey: privateKey}
+}
+
 
 func (blockchain *Blockchain) RegisterNode(ip, port string) {
     blockchain.Nodes[ip+":"+port] = true
@@ -100,13 +155,22 @@ func handleConnection(conn net.Conn, blockchain *Blockchain) {
     // Use a switch statement to handle different types of requests
     switch {
     case data == "mine":
+        if syncLock {
+            return
+        }
         blockchain.Sync()
         blockchain.mineBlock()
+        if syncLock {
+            return
+        }
         blockchain.Sync()
         conn.Write([]byte("Block mined"))
     case data == "getchain":
+        if syncLock {
+            return
+        }
         blockchain.Sync()
-		println(blockchain.Nodes)
+	
         sendData, _ := json.Marshal(blockchain.Chain)
         conn.Write([]byte(string(sendData)))
     case data == "getnodecount":
@@ -125,6 +189,8 @@ func handleConnection(conn net.Conn, blockchain *Blockchain) {
             conn.Write([]byte("Invalid node information"))
         }
     }
+    
+    
 }
 
 
@@ -170,7 +236,14 @@ func (blockchain *Blockchain) validateChain(receivedChain []Block) bool {
 }
 
 func (blockchain *Blockchain) Sync() {
+    if syncLock {
+        return
+    }
+    syncLock = true
+    defer func() { syncLock = false }()
+
     for node := range blockchain.Nodes {
+        fmt.Print("retrieving data from: "+node)
         _, err := net.DialTimeout("tcp", node, time.Second*5)
         if err != nil {
             log.Printf("Failed to connect to node %s: %v", node, err)
@@ -187,7 +260,7 @@ func (blockchain *Blockchain) Sync() {
         }
         defer conn.Close()
         conn.Write([]byte("getchain"))
-        buf := make([]byte, 4096)
+        buf := make([]byte, 2000000)
         n, err := conn.Read(buf)
         if err != nil {
             log.Printf("Failed to get chain from node %s: %v", node, err)
@@ -198,6 +271,7 @@ func (blockchain *Blockchain) Sync() {
         receivedData := string(buf[:n])
         var receivedChain []Block
         json.Unmarshal([]byte(receivedData), &receivedChain)
+        //fmt.Print(receivedChain)
         if blockchain.validateChain(receivedChain) && len(receivedChain) > len(blockchain.Chain) {
             blockchain.Chain = receivedChain
         }
@@ -210,30 +284,49 @@ func (blockchain *Blockchain) Sync() {
 func (blockchain *Blockchain) mineBlock() {
     lastBlock := blockchain.LastBlock()
     proof := blockchain.PoW(lastBlock)
-    blockchain.NewTransaction("network", blockchain.NodeIP, 1)
-    blockchain.NewBlock(proof, lastBlock.Hash)
+    for publicKey := range blockchain.Accounts {
+        fmt.Print(publicKey)
+        }
+        // Validate transactions before creating the block
+        for _, transaction := range blockchain.TmpTxs {
+            pubKey := blockchain.Accounts[transaction.SenderPublicKey].Public().(*ecdsa.PublicKey)
+        r := new(big.Int).SetBytes(transaction.Signature[:32])
+        s := new(big.Int).SetBytes(transaction.Signature[32:])
+        hashedTransaction, _ := json.Marshal(transaction)
+        fmt.Print(hashedTransaction)
+        fmt.Print(pubKey)
+        if !ecdsa.Verify(pubKey, hashedTransaction, r, s) {
+            fmt.Print("mismatch")
+            return 
+        }
+        
+        }
+        blockchain.NewBlock(proof, lastBlock.Hash)
+        }
 
-}
+
 
 
 func (blockchain *Blockchain) PoW(lastBlock Block) int64 {
-	var proof int64
-	var hash string
-	for {
-		hash = blockchain.HashBlock(Block{
-			Index:        lastBlock.Index + 1,
-			Timestamp:    time.Now().UnixNano(),
-			Transactions: blockchain.TmpTxs,
-			Proof:        proof,
-			PreviousHash: lastBlock.Hash,
-		})
-		if hash[:4] == "0000" {
-			break
-		}
-		proof++
-	}
-	return proof
-}
+    var proof int64
+    var hash string
+    for publicKey := range blockchain.Accounts{
+        hash = blockchain.HashBlock(Block{
+        Index: lastBlock.Index + 1,
+        Timestamp: time.Now().UnixNano(),
+        Transactions: blockchain.TmpTxs,
+        Proof: proof,
+        PreviousHash: lastBlock.Hash,
+        Miner: publicKey,
+        })
+        if hash[:4] == "0000" {
+        break
+        }
+        proof++
+        }
+        return proof
+        }
+
 func (blockchain *Blockchain) loadNodesFromFile() {
     file, err := os.Open("nodes.txt")
     if err != nil {
@@ -268,7 +361,7 @@ func (blockchain *Blockchain) loadNodesFromFile() {
 
 func main() {
 	
-	lis, err := net.Listen("tcp", ":2006")
+	lis, err := net.Listen("tcp", ":2005")
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
@@ -276,9 +369,24 @@ func main() {
 
 		
 	
-	blockchain := Blockchain{Chain: []Block{}, Nodes: map[string]bool{}}
+    blockchain := Blockchain{Chain: []Block{}, Nodes: map[string]bool{}, Accounts: map[string]*ecdsa.PrivateKey{}}
     blockchain.loadNodesFromFile()
-	blockchain.NodeIP, blockchain.NodePort, _ = net.SplitHostPort(lis.Addr().String())
+
+    priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+    pub := priv.PublicKey
+    pubkey := hex.EncodeToString(elliptic.Marshal(elliptic.P256(), pub.X, pub.Y))
+    blockchain.Accounts[pubkey] = priv
+    blockchain.CreateAccount("127.0.0.1")
+    fmt.Println("Private Key:", hex.EncodeToString(priv.D.Bytes()))
+    fmt.Println("Public Key:", hex.EncodeToString(elliptic.Marshal(elliptic.P256(), pub.X, pub.Y)))
+    blockchain.NewTransaction(priv,"recipient",1)
+
+
+blockchain.CreateAccount("127.0.0.1")
+fmt.Println("Private Key:", hex.EncodeToString(priv.D.Bytes()))
+curve := elliptic.P256()
+fmt.Println("Public Key:", hex.EncodeToString(elliptic.Marshal(curve, pub.X, pub.Y)))
+blockchain.NewTransaction(priv,"recipient",1)
 
 	
 	
